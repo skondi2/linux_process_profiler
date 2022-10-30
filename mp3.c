@@ -35,7 +35,7 @@ struct mp3_task_struct {
 };
 
 struct workqueue_struct* queue;
-struct delayed_work* work;
+struct work_struct* work;
 
 int PAGE_SIZE = 4000; // 4 KB
 int NUM_PAGES = 128;
@@ -68,10 +68,11 @@ void work_callback(struct work_struct* work) {
             if (ret != 0) {
                printk("MP3 Invalid PID");
             }
-            
-            total_minor_count += minor_count;
-            total_major_count += major_count;
-            total_cpu_time += (user_mode_time + kernel_mode_time);
+            else {
+               total_minor_count += minor_count;
+               total_major_count += major_count;
+               total_cpu_time += ((user_mode_time + kernel_mode_time) / jiffies);
+            }
    }
    spin_unlock_irq(&list_lock);
 
@@ -86,7 +87,7 @@ void work_callback(struct work_struct* work) {
    buffer_pos++;
    shared_mem_buffer[buffer_pos] = total_major_count;
    buffer_pos++;
-   shared_mem_buffer[buffer_pos] = msecs_to_jiffies(total_cpu_time);
+   shared_mem_buffer[buffer_pos] = total_cpu_time;
    buffer_pos++;
    spin_unlock_irq(&buffer_lock);
 
@@ -94,7 +95,38 @@ void work_callback(struct work_struct* work) {
 }
 
 ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, loff_t* pos) {
-   return 0;
+   char* data = kmalloc(size, GFP_KERNEL);
+   memset(data, 0, size);
+
+   // write to data the linked list node data
+   int bytes_read = 0;
+   struct process_list* tmp;
+   struct list_head* curr_pos;
+
+   spin_lock_irq(&lock);
+   list_for_each(curr_pos, &(registered_processes->list)) {
+      tmp = list_entry(curr_pos, struct process_list, list);
+      int pid = tmp->mp3_task->pid;
+
+      if (pid > *pos) {
+         int curr_bytes_read = sprintf(data + bytes_read, "%d\n", pid);
+         if (bytes_read + curr_bytes_read >= size) {
+            break;
+         }
+         *pos = pid;
+         bytes_read += curr_bytes_read;
+      }
+   }
+   data[bytes_read] = '\0';
+   spin_unlock_irq(&lock);
+
+   int success = copy_to_user(buf, data, bytes_read+1);
+   if (success != 0) {
+      return 0;
+   }
+   kfree(data);
+
+   return bytes_read; // return the number of bytes that were read
 }
 
 ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t size, loff_t* pos) {
@@ -133,12 +165,11 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
       // create work/job if first pid registered
       if (list_empty(&(registered_processes->list))) { 
-         work = kmalloc(sizeof(struct delayed_work), GFP_KERNEL);
-         INIT_DELAYED_WORK(work, work_callback);
+         work = kmalloc(sizeof(struct work_struct), GFP_KERNEL);
+         INIT_WORK(work, work_callback);
          queue_delayed_work(queue, work, jiffies + msecs_to_jiffies(50));
       }
       spin_unlock_irq(&list_lock);
-      
    }
    else if (operation == "U") {
       // delete process from linked list
@@ -155,7 +186,8 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
             // if list is empty, job is also deleted
             if (list_empty(&(registered_processes->list))) { 
-               cancel_delayed_work_sync(work);
+               flush_work(work);
+               cancel_work_sync(work);
                kfree(work);
             }
          }
@@ -174,6 +206,21 @@ const struct proc_ops proc_fops = {
 
 struct proc_dir_entry* proc_dir;
 struct proc_dir_entry* proc_file;
+
+static int my_open(struct inode *inode, struct file *file) {
+   return 0;
+}
+
+static int my_release(struct inode *inode, struct file *file) {
+   return 0;
+}
+
+const struct file_operations dev_fops = {
+   .open = my_open;
+   .mmap = my_mmap;
+   .release = my_release;
+   .owner = THIS_MODULE;
+};
 
 // mp1_init - Called when module is loaded
 int __init mp3_init(void)
