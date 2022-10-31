@@ -3,6 +3,10 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/vmalloc.h>
+#include <linux/slab.h>
+#include <linux/proc_fs.h>
+#include <linux/spinlock.h>
+#include <linux/list.h>
 #include "mp3_given.h"
 
 MODULE_LICENSE("GPL");
@@ -12,11 +16,9 @@ MODULE_DESCRIPTION("CS-423 MP3");
 #define DEBUG 1
 
 /*
-
 NOTES:
 https://linux-kernel-labs.github.io/refs/heads/master/labs/deferred_work.html
 https://linux-kernel-labs.github.io/refs/heads/master/labs/memory_mapping.html
-
 */
 
 struct process_list {
@@ -27,7 +29,7 @@ struct process_list* registered_processes;
 spinlock_t list_lock;
 
 struct mp3_task_struct {
-   struct task_struct linux_task; // PCB
+   struct task_struct* linux_task; // PCB
    int pid;
    unsigned long major_fault_count; 
    unsigned long minor_fault_count;
@@ -35,10 +37,10 @@ struct mp3_task_struct {
 };
 
 struct workqueue_struct* queue;
-struct work_struct* work;
+struct delayed_work* work;
 
-int PAGE_SIZE = 4000; // 4 KB
-int NUM_PAGES = 128;
+int BUF_PAGE_SIZE = 4000; // 4 KB
+int BUF_NUM_PAGES = 128;
 
 // maximum 12,000 samples
 // each sample has 4 unsigned longs (4 * 4 bytes = 16 bytes)
@@ -48,7 +50,7 @@ int buffer_pos;
 spinlock_t buffer_lock;
 
 void work_callback(struct work_struct* work) {
-   unsigned long total_minor_count = 0;
+   /*unsigned long total_minor_count = 0;
    unsigned long total_major_count = 0;
    unsigned long total_cpu_time = 0;
    
@@ -77,7 +79,7 @@ void work_callback(struct work_struct* work) {
    spin_unlock_irq(&list_lock);
 
    spin_lock_irq(&buffer_lock);
-   if (buffer_pos >= (PAGE_SIZE * NUM_PAGES) / 4) {
+   if (buffer_pos >= (BUF_PAGE_SIZE * NUM_PAGES) / 4) {
       buffer_pos = 0;
    }
 
@@ -92,6 +94,7 @@ void work_callback(struct work_struct* work) {
    spin_unlock_irq(&buffer_lock);
 
    queue_delayed_work(queue, work, jiffies + msecs_to_jiffies(50));
+   */
 }
 
 ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, loff_t* pos) {
@@ -103,7 +106,7 @@ ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, lof
    struct process_list* tmp;
    struct list_head* curr_pos;
 
-   spin_lock_irq(&lock);
+   spin_lock_irq(&list_lock);
    list_for_each(curr_pos, &(registered_processes->list)) {
       tmp = list_entry(curr_pos, struct process_list, list);
       int pid = tmp->mp3_task->pid;
@@ -118,7 +121,7 @@ ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, lof
       }
    }
    data[bytes_read] = '\0';
-   spin_unlock_irq(&lock);
+   spin_unlock_irq(&list_lock);
 
    int success = copy_to_user(buf, data, bytes_read+1);
    if (success != 0) {
@@ -135,7 +138,11 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
    }
 
    char* buf_cpy = kmalloc(size+1, GFP_KERNEL);
-   copy_from_user(buf_cpy, buf, size);
+   int success = copy_from_user(buf_cpy, buf, size);
+   if (success != 0) {
+      printk("MP3 copy_from_user failed");
+      return 0;
+   }
    buf_cpy[size] = '\0';
 
    char* temp = kmalloc(size+1, GFP_KERNEL);
@@ -146,32 +153,36 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
    temp = temp + 2; // remove the first comma
 
    int pid;
-   kstrtoint(temp, 10, &pid);
+   success = kstrtoint(temp, 10, &pid);
+   if (success != 0) {
+      printk("MP3 kstrtoint failed");
+      return 0;
+   }
 
-   if (operation == "R") {
+   if (operation == 'R') {
       // add process to linked list
       struct mp3_task_struct* task = kmalloc(sizeof(struct mp3_task_struct), GFP_KERNEL);
-      memset(task, 0, sizeof(mp3_task_struct));
+      memset(task, 0, sizeof(struct mp3_task_struct));
       task->linux_task = find_task_by_pid(pid); // TODO: initialize major, minor, utilization?
       task->pid = pid;
 
       struct process_list* node = kmalloc(sizeof(struct process_list), GFP_KERNEL);
-      memset(node, 0, sizeof(process_list));
+      memset(node, 0, sizeof(struct process_list));
       node->mp3_task = task;
       INIT_LIST_HEAD(&(node->list));
 
       spin_lock_irq(&list_lock);
-      list_add_tail(&(tmp->list), &(registered_processes->list));
+      list_add_tail(&(node->list), &(registered_processes->list));
 
       // create work/job if first pid registered
       if (list_empty(&(registered_processes->list))) { 
-         work = kmalloc(sizeof(struct work_struct), GFP_KERNEL);
-         INIT_WORK(work, work_callback);
+         work = kmalloc(sizeof(struct delayed_work), GFP_KERNEL);
+         INIT_DELAYED_WORK(work, work_callback);
          queue_delayed_work(queue, work, jiffies + msecs_to_jiffies(50));
       }
       spin_unlock_irq(&list_lock);
    }
-   else if (operation == "U") {
+   else if (operation == 'U') {
       // delete process from linked list
       struct process_list* tmp;
       struct list_head *curr_pos, *q;
@@ -186,8 +197,8 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
             // if list is empty, job is also deleted
             if (list_empty(&(registered_processes->list))) { 
-               flush_work(work);
-               cancel_work_sync(work);
+               flush_delayed_work(work);
+               cancel_delayed_work_sync(work);
                kfree(work);
             }
          }
@@ -207,6 +218,7 @@ const struct proc_ops proc_fops = {
 struct proc_dir_entry* proc_dir;
 struct proc_dir_entry* proc_file;
 
+/*
 static int my_open(struct inode *inode, struct file *file) {
    return 0;
 }
@@ -221,6 +233,7 @@ const struct file_operations dev_fops = {
    .release = my_release;
    .owner = THIS_MODULE;
 };
+*/
 
 // mp1_init - Called when module is loaded
 int __init mp3_init(void)
@@ -232,7 +245,7 @@ int __init mp3_init(void)
    proc_dir = proc_mkdir("mp3", NULL);
    proc_file = proc_create("status", 0666, proc_dir, &proc_fops);
    
-   registered_processes - kmalloc(sizeof(struct process_list), GFP_KERNEL);
+   registered_processes = kmalloc(sizeof(struct process_list), GFP_KERNEL);
    INIT_LIST_HEAD(&(registered_processes->list));
 
    spin_lock_init(&list_lock);
@@ -241,12 +254,13 @@ int __init mp3_init(void)
    queue = create_workqueue("queue");
 
    // allocate memory buffer
-   shared_mem_buffer = vmalloc(PAGE_SIZE * NUM_PAGES);
+   /*shared_mem_buffer = vmalloc(BUF_PAGE_SIZE * BUF_NUM_PAGES);
    buffer_pos = 0;
-   for (int i = 0; i < NUM_PAGES * PAGE_SIZE; i += PAGE_SIZE) {
+   int i = 0;
+   for (i = 0; i < BUF_NUM_PAGES * BUF_PAGE_SIZE; i += BUF_PAGE_SIZE) {
       // prevent the pages from being swapped out to disk
       SetPageReserved(virt_to_page(((unsigned long)shared_mem_buffer) + i));
-   }
+   }*/
    
    printk(KERN_ALERT "MP3 MODULE LOADED\n");
    return 0;   
@@ -270,10 +284,11 @@ void __exit mp3_exit(void)
    }
 
    // deallocate memory buffer
-   for (int i = 0; i < NUM_PAGES * PAGE_SIZE; i += PAGE_SIZE) {
+   /*int i = 0;
+   for (i = 0; i < BUF_NUM_PAGES * BUF_PAGE_SIZE; i += BUF_PAGE_SIZE) {
       ClearPageReserved(virt_to_page(((unsigned long)shared_mem_buffer) + i));
    }
-   vfree(shared_mem_buffer);
+   vfree(shared_mem_buffer);*/
    
    remove_proc_entry("status", proc_dir);
    remove_proc_entry("mp3", NULL);
