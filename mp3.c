@@ -7,6 +7,8 @@
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
+#include <linux/cdev.h>
+#include <linux/fs.h>
 #include "mp3_given.h"
 
 MODULE_LICENSE("GPL");
@@ -49,8 +51,10 @@ unsigned long* shared_mem_buffer;
 int buffer_pos;
 spinlock_t buffer_lock;
 
-void work_callback(struct work_struct* work) {
-   /*unsigned long total_minor_count = 0;
+struct cdev* cdev;
+
+void work_callback(struct work_struct* work_) {
+   unsigned long total_minor_count = 0;
    unsigned long total_major_count = 0;
    unsigned long total_cpu_time = 0;
    
@@ -79,7 +83,7 @@ void work_callback(struct work_struct* work) {
    spin_unlock_irq(&list_lock);
 
    spin_lock_irq(&buffer_lock);
-   if (buffer_pos >= (BUF_PAGE_SIZE * NUM_PAGES) / 4) {
+   if (buffer_pos >= (BUF_PAGE_SIZE * BUF_NUM_PAGES) / 4) {
       buffer_pos = 0;
    }
 
@@ -92,9 +96,9 @@ void work_callback(struct work_struct* work) {
    shared_mem_buffer[buffer_pos] = total_cpu_time;
    buffer_pos++;
    spin_unlock_irq(&buffer_lock);
-
-   queue_delayed_work(queue, work, jiffies + msecs_to_jiffies(50));
-   */
+   
+   struct delayed_work* delayed_work = container_of(work_, struct delayed_work, work);
+   queue_delayed_work(queue, delayed_work, jiffies + msecs_to_jiffies(50));
 }
 
 ssize_t proc_read_callback(struct file* file, char __user *buf, size_t size, loff_t* pos) {
@@ -197,7 +201,6 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
             // if list is empty, job is also deleted
             if (list_empty(&(registered_processes->list))) { 
-               flush_delayed_work(work);
                cancel_delayed_work_sync(work);
                kfree(work);
             }
@@ -218,22 +221,19 @@ const struct proc_ops proc_fops = {
 struct proc_dir_entry* proc_dir;
 struct proc_dir_entry* proc_file;
 
-/*
-static int my_open(struct inode *inode, struct file *file) {
-   return 0;
-}
+static int char_dev_open_callback(struct inode* inode, struct file* filep) {return 0;}
+static int char_dev_close_callback(struct inode* inode, struct file* filep) {return 0;}
 
-static int my_release(struct inode *inode, struct file *file) {
+static int char_dev_mmap_callback(struct file* filep, struct vm_area_struct* vma) {
    return 0;
 }
 
 const struct file_operations dev_fops = {
-   .open = my_open;
-   .mmap = my_mmap;
-   .release = my_release;
-   .owner = THIS_MODULE;
+   .open = char_dev_open_callback,
+   .mmap = char_dev_mmap_callback,
+   .release = char_dev_close_callback,
+   .owner = THIS_MODULE
 };
-*/
 
 // mp1_init - Called when module is loaded
 int __init mp3_init(void)
@@ -253,14 +253,21 @@ int __init mp3_init(void)
 
    queue = create_workqueue("queue");
 
-   // allocate memory buffer
-   /*shared_mem_buffer = vmalloc(BUF_PAGE_SIZE * BUF_NUM_PAGES);
+   shared_mem_buffer = vmalloc(BUF_PAGE_SIZE * BUF_NUM_PAGES);
    buffer_pos = 0;
-   int i = 0;
-   for (i = 0; i < BUF_NUM_PAGES * BUF_PAGE_SIZE; i += BUF_PAGE_SIZE) {
-      // prevent the pages from being swapped out to disk
-      SetPageReserved(virt_to_page(((unsigned long)shared_mem_buffer) + i));
-   }*/
+   
+   int res = register_chrdev_region(MKDEV(91, 0), 1, "mp3dev");
+   if (res < 0) {
+      printk("MP3 register_chrdev_region failed = %d\n", res);
+   }
+
+   cdev = kmalloc(sizeof(struct cdev), GFP_KERNEL);
+   cdev_init(cdev, &dev_fops);
+
+   res = cdev_add(cdev, MKDEV(91, 0), 1);
+   if (res < 0) {
+      printk("MP3 cdev_add failed = %d\n", res);
+   }
    
    printk(KERN_ALERT "MP3 MODULE LOADED\n");
    return 0;   
@@ -273,6 +280,7 @@ void __exit mp3_exit(void)
    printk(KERN_ALERT "MP3 MODULE UNLOADING\n");
    #endif
 
+   flush_workqueue(queue);
    destroy_workqueue(queue);
 
    struct process_list* tmp;
@@ -283,12 +291,10 @@ void __exit mp3_exit(void)
       kfree(tmp);
    }
 
-   // deallocate memory buffer
-   /*int i = 0;
-   for (i = 0; i < BUF_NUM_PAGES * BUF_PAGE_SIZE; i += BUF_PAGE_SIZE) {
-      ClearPageReserved(virt_to_page(((unsigned long)shared_mem_buffer) + i));
-   }
-   vfree(shared_mem_buffer);*/
+   vfree(shared_mem_buffer);
+
+   unregister_chrdev_region(MKDEV(91, 0), 1);
+   cdev_del(cdev);
    
    remove_proc_entry("status", proc_dir);
    remove_proc_entry("mp3", NULL);
