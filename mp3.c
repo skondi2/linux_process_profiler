@@ -9,6 +9,7 @@
 #include <linux/list.h>
 #include <linux/cdev.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 #include "mp3_given.h"
 
 MODULE_LICENSE("GPL");
@@ -225,6 +226,18 @@ static int char_dev_open_callback(struct inode* inode, struct file* filep) {retu
 static int char_dev_close_callback(struct inode* inode, struct file* filep) {return 0;}
 
 static int char_dev_mmap_callback(struct file* filep, struct vm_area_struct* vma) {
+   // map physical pages of shared_mem_buffer to virtual address space
+
+   // vmalloc_to_pfn(virtual_address) gets physical page address of virtual page in buffer
+   unsigned long pfn = vmalloc_to_pfn(shared_mem_buffer);
+
+   // remap_pfn_range() maps a contiguous physical address space into the virtual space represented by vm_area_struct
+   unsigned long len = vma->vm_end - vma->vm_start;
+   int ret = remap_pfn_range(vma, vma->vm_start, pfn, len, vma->vm_page_prot);
+   if (ret < 0) {
+      printk("MP3 remap_pfn_range didn't work");
+      return -EIO;
+   }
    return 0;
 }
 
@@ -261,13 +274,13 @@ int __init mp3_init(void)
       printk("MP3 register_chrdev_region failed = %d\n", res);
    }
 
-   cdev = kmalloc(sizeof(struct cdev), GFP_KERNEL);
+   /*cdev = kmalloc(sizeof(struct cdev), GFP_KERNEL);
    cdev_init(cdev, &dev_fops);
 
    res = cdev_add(cdev, MKDEV(91, 0), 1);
    if (res < 0) {
       printk("MP3 cdev_add failed = %d\n", res);
-   }
+   }*/
    
    printk(KERN_ALERT "MP3 MODULE LOADED\n");
    return 0;   
@@ -294,7 +307,7 @@ void __exit mp3_exit(void)
    vfree(shared_mem_buffer);
 
    unregister_chrdev_region(MKDEV(91, 0), 1);
-   cdev_del(cdev);
+   //cdev_del(cdev);
    
    remove_proc_entry("status", proc_dir);
    remove_proc_entry("mp3", NULL);
