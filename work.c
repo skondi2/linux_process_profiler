@@ -69,7 +69,7 @@ int main(int argc, char* argv[])
 
   // 1. Register itself to the MP3 kernel module for profiling.
   mypid = syscall(__NR_gettid);
-  sprintf(cmd, "echo 'R %u'>//proc/mp3/status", mypid);
+  sprintf(cmd, "echo 'R %u'> /proc/mp3/status", mypid);
   ret = system(cmd);
   (void)ret;
 
@@ -101,7 +101,7 @@ int main(int argc, char* argv[])
          }
          else{ /* local access */
            addr = local_access(addr);
-	 }
+	        }
        }
      }
      sleep(1);
@@ -113,10 +113,11 @@ int main(int argc, char* argv[])
   }
 
   // 5. Unregister itself to stop the profiling
-  sprintf(cmd, "echo 'U %u'>//proc/mp3/status", mypid);
+  sprintf(cmd, "echo 'U %u'> /proc/mp3/status", mypid);
+  printf("[%d] unregistering \n", mypid);
   ret = system(cmd);
   (void)ret;
-
+  printf("[%d] done \n", mypid);
   return 0;
 }
 
