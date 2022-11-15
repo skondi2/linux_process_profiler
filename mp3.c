@@ -79,11 +79,12 @@ void work_callback(struct work_struct* work_) {
             else {
                total_minor_count += minor_count;
                total_major_count += major_count;
-               total_cpu_time += (user_mode_time + kernel_mode_time);
+               total_cpu_time += (user_mode_time + kernel_mode_time); 
             }
    }
    spin_unlock_irq(&list_lock);
 
+   //printk("MP3 %ld %ld %ld %ld\n", jiffies, total_minor_count, total_major_count, total_cpu_time);
    spin_lock_irq(&buffer_lock);
    shared_mem_buffer[buffer_pos] = jiffies;
    buffer_pos++;
@@ -91,11 +92,11 @@ void work_callback(struct work_struct* work_) {
    buffer_pos++;
    shared_mem_buffer[buffer_pos] = total_major_count;
    buffer_pos++;
-   shared_mem_buffer[buffer_pos] = total_cpu_time / jiffies;
+   shared_mem_buffer[buffer_pos] = total_cpu_time;
    buffer_pos++;
 
    if (buffer_pos + 1 == 48000) {
-      printk("MP3 Resetting buffer pos");
+      //printk("MP3 Resetting buffer pos");
       buffer_pos = 0;
    }
    spin_unlock_irq(&buffer_lock);
@@ -165,10 +166,6 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
 
    int pid;
    success = kstrtoint(temp, 10, &pid);
-   if (success != 0) {
-      printk("MP3 kstrtoint failed");
-      return 0;
-   }
 
    if (operation == 'R') {
       // add process to linked list
@@ -206,12 +203,12 @@ ssize_t proc_write_callback(struct file* file, const char __user *buf, size_t si
          if (tmp->mp3_task->pid == pid) {
             list_del(curr_pos);
             kfree(tmp);
-            printk("MP3 deleting pid %d from list\n", pid);
+            //printk("MP3 deleting pid %d from list\n", pid);
          }
       }
       // if list is empty, job is also deleted
       if (list_empty(&(registered_processes->list))) { 
-         printk("MP3 list emptied\n");
+         //printk("MP3 list emptied\n");
          cancel_delayed_work_sync(work);
          kfree(work);
       }
@@ -231,28 +228,29 @@ struct proc_dir_entry* proc_dir;
 struct proc_dir_entry* proc_file;
 
 // map physical pages of shared_mem_buffer to virtual address space
-static int char_dev_mmap_callback(struct file* filep, struct vm_area_struct* vma) {
-   int i;
+static int _char_dev_mmap_callback(struct file* filep, struct vm_area_struct* vma) {
+   int i = 0;
    unsigned long user_process_msize = vma->vm_end - vma->vm_start;
-   printk("MP3 len = %lu\n", user_process_msize);
+   //printk("MP3 len = %lu\n", user_process_msize);
 
-   for (i = 0; i < user_process_msize; i += BUF_PAGE_SIZE) {
+   for (; i < user_process_msize; i += BUF_PAGE_SIZE) {
       // get physical page address of virtual page in buffer
-      unsigned long pfn = vmalloc_to_pfn(shared_mem_buffer + i);
+      unsigned long pfn = vmalloc_to_pfn((char*)shared_mem_buffer + i); 
 
       // map continguous physical address space to the virtual space
-      int ret = remap_pfn_range(vma, vma->vm_start + i, pfn, PAGE_SIZE, vma->vm_page_prot);
+      int ret = remap_pfn_range(vma, vma->vm_start + i, pfn, BUF_PAGE_SIZE, vma->vm_page_prot);
       if (ret < 0) {
          printk("MP3 remap_pfn_range didn't work");
          return -EIO;
       }
    }
+   printk("MP3 finished mmap()\n");
    return 0;
 }
 
 const struct file_operations dev_fops = {
    .open = NULL,
-   .mmap = char_dev_mmap_callback,
+   .mmap = _char_dev_mmap_callback,
    .release = NULL,
    .owner = THIS_MODULE
 };
